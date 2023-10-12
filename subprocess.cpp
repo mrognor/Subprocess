@@ -3,129 +3,193 @@
 #include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <thread>
+#include <queue>
 
-int main()
+class Subprocess
 {
-    int fdin[2], fdout[2], n;
-    pid_t p;
+private:
+    int PipeToChild[2];
+    int PipeFromChild[2];
+    int n;
+    pid_t Pid;
+    std::queue<std::string> MessagesQueue;
+    std::thread th;
 
-    pipe(fdin);
-    pipe(fdout);
-
-    p = fork();
-
-    if (p > 0)
+public:
+    void Launch(std::string programmName)
     {
-        std::cout << "Parent entered!" << std::endl;
-        
-        close(fdin[0]);
-        close(fdout[1]);
-
-        std::string msg;
-
-        // Set of descriptors to poll
-        fd_set rfds;
-
-        std::thread th([&]()
+        if (pipe(PipeToChild))
         {
-            while (true)
-            {
-                // Zeroed set
-                FD_ZERO(&rfds);
-                // Add fdout[0] to poll set
-                FD_SET(fdout[0], &rfds);
-
-                int retval;
-            
-                retval = select(fdout[1] + 1, &rfds, NULL, NULL, NULL);
-                
-                int nbytes;
-                ioctl(fdout[0], FIONREAD, &nbytes);
-
-                char* bytes = new char [nbytes];
-                int readed = read(fdout[0], bytes, nbytes);
-                
-                std::cout << retval << " " << FD_ISSET(fdout[0], &rfds) << " " << readed << std::endl;
-
-                if (bytes[0] == 'f' || readed == 0)
-                {
-                    delete[] bytes;
-                    break;
-                }
-
-                std::cout << "Parent! " << bytes << std::endl;
-                delete[] bytes;
-            }
-        });
-
-        while (true)
-        {
-            getline(std::cin, msg);
-            
-            msg += "\n";
-            write(fdin[1], msg.c_str(), msg.length());
-
-            if (msg == "f\n")
-                break;
+            std::cerr << "Failed to create pipe!" << std::endl;
+            return;
         }
 
+        if (pipe(PipeFromChild))
+        {
+            std::cerr << "Failed to create pipe!" << std::endl;
+            return;
+        }
+
+        // Create fork of current process
+        Pid = fork();
+
+        // Parent process
+        if (Pid > (pid_t)0)
+        {
+            // Close unrequired pipes ends
+            close(PipeToChild[0]);
+            close(PipeFromChild[1]);
+
+            th = std::thread([&]()
+            {
+                // Array of descriptors to poll
+                fd_set requiredPipeEndsToPoll;
+
+                while (true)
+                {
+                    // Zeroed set
+                    FD_ZERO(&requiredPipeEndsToPoll);
+                    // Add fdout[0] to poll set
+                    FD_SET(PipeFromChild[0], &requiredPipeEndsToPoll);
+      
+                    // Wait data in PipeFromChild
+                    if (select(PipeFromChild[1] + 1, &requiredPipeEndsToPoll, NULL, NULL, NULL) == -1)
+                    {
+                        std::cerr << "Failed to select data from pipe! Errno: " << errno << std::endl;
+                        return;
+                    }
+
+                    // Check if it is data from child inside pipe
+                    if(FD_ISSET(PipeFromChild[0], &requiredPipeEndsToPoll))
+                    {
+                        // Get available data  
+                        int nbytes;
+                        ioctl(PipeFromChild[0], FIONREAD, &nbytes);
+
+                        // Allocate array
+                        char* bytes = new char [nbytes];
+
+                        // Read data from pipe
+                        int readed = read(PipeFromChild[0], bytes, nbytes);
+
+                        // EOF
+                        if (readed == 0)
+                        {
+                            delete[] bytes;
+                            break;
+                        }
+
+                        if (readed != nbytes)
+                        {
+                            std::cerr << "Failed to read data from pipe!" << std::endl;
+                            delete[] bytes;
+                            return;
+                        }
+
+                        MessagesQueue.push(std::string(bytes));
+                        delete[] bytes;
+                    }
+                }
+            });
+            return;
+        }
+
+        // Child process
+        if (Pid == (pid_t)0)
+        {
+            close(STDOUT_FILENO);
+            close(STDIN_FILENO);
+
+            close(PipeToChild[1]);
+            close(PipeFromChild[0]);
+
+            dup2(PipeToChild[0], STDIN_FILENO);
+            dup2(PipeFromChild[1], STDOUT_FILENO);
+
+            close(PipeToChild[0]);
+            close(PipeFromChild[1]);
+
+            std::string command = programmName + " 2>&1";
+            
+            system(command.c_str());
+
+            exit(EXIT_SUCCESS);
+        }
+        
+        // Error
+        if (Pid < (pid_t)0)
+        {
+            std::cerr << "Failed to create fork!" << std::endl;
+            return;
+        }
+    }
+
+    void SendData(std::string data, bool isRequiredNewLineSymbol = true)
+    {
+        if (isRequiredNewLineSymbol)
+            data += '\n';
+
+        write(PipeToChild[1], data.c_str(), data.length());
+    }
+
+    std::string GetData()
+    {
+        std::string res = "";
+        if (!MessagesQueue.empty())
+        {
+            res = MessagesQueue.front();
+            MessagesQueue.pop();
+        }
+        return res;
+    }
+
+    void StopProcess(std::string commandToSendToProcessToStop, bool isRequiredNewLineSymbol = true)
+    {
+        SendData(commandToSendToProcessToStop, isRequiredNewLineSymbol);
         th.join();
 
         int a;
-        waitpid(p, &a, 0);
-
-        close(fdin[1]);
-        close(fdout[0]);
+        waitpid(Pid, &a, 0);
+        close(PipeToChild[1]);
+        close(PipeFromChild[0]);
     }
-    else
+
+    ~Subprocess()
     {
-        std::cout << "Child entered!" << std::endl;
+        if (th.joinable())
+        {
+            std::cerr << "Thread was not joined! Higly possible thar you dont stop process" << std::endl;
+        }
+    }
+};
 
-        close(STDOUT_FILENO);
-        close(STDIN_FILENO);
-        close(STDERR_FILENO);
+// g++ subprocess.cpp -lpthread
+int main()
+{
+    // Что будет если процесс закончиться, а я попрбую записать данные туда. 
+    Subprocess s;
+    
+    s.Launch("bc");
 
-        close(fdin[1]);
-        close(fdout[0]);
-
-        dup2(fdin[0], STDIN_FILENO);
-        dup2(fdout[1], STDOUT_FILENO);
-
-        close(fdin[0]);
-        close(fdout[1]);
-
-        system("psql 2>&1");
-        // // Set of descriptors to poll
-        // fd_set rfds;
-
-        // while (true)
-        // {
-        //     // Zeroed set
-        //     FD_ZERO(&rfds);
-        //     // Add fdin[0] to poll set
-        //     FD_SET(fdin[0], &rfds);
-
-        //     int retval;
+    std::string msg;
+    while (true)
+    {
+        getline(std::cin, msg);
         
-        //     retval = select(fdin[1] + 1, &rfds, NULL, NULL, NULL);
-        //     std::cout << retval << " " << FD_ISSET(fdin[0], &rfds) << std::endl;
-        //     int nbytes;
-        //     ioctl(fdin[0], FIONREAD, &nbytes);
+        if (msg == "f")
+        {
+            s.StopProcess("quit");
+            break;
+        }
 
-        //     char* bytes = new char [nbytes];
-        //     read(fdin[0], bytes, nbytes);
-            
-        //     std::cout << "Child! " << bytes << std::endl;
-            
-        //     write(fdout[1], bytes, nbytes);
+        s.SendData(msg);
+        sleep(1);
 
-        //     if (bytes[0] == 'f')
-        //     {
-        //         delete[] bytes;
-        //         break;
-        //     }
+        std::string res = s.GetData();
 
-        //     delete[] bytes;
-        // }
+        if (!res.empty())
+            res.pop_back();
+
+        std::cout << res << std::endl;
     }
 }
