@@ -4,6 +4,8 @@
 #include <sys/ioctl.h>
 #include <thread>
 #include <queue>
+#include <atomic>
+#include <condition_variable>
 
 class Subprocess
 {
@@ -13,11 +15,15 @@ private:
     int n;
     pid_t Pid;
     std::queue<std::string> MessagesQueue;
-    std::thread th;
-
+    std::thread Th;
+    std::atomic_uint64_t DataCounter;
+    std::condition_variable Cv;
+    std::mutex Mtx;
 public:
     void Launch(std::string programmName)
     {
+        DataCounter.store(0);
+
         if (pipe(PipeToChild))
         {
             std::cerr << "Failed to create pipe!" << std::endl;
@@ -40,7 +46,7 @@ public:
             close(PipeToChild[0]);
             close(PipeFromChild[1]);
 
-            th = std::thread([&]()
+            Th = std::thread([&]()
             {
                 // Array of descriptors to poll
                 fd_set requiredPipeEndsToPoll;
@@ -72,6 +78,14 @@ public:
                         // Read data from pipe
                         int readed = read(PipeFromChild[0], bytes, nbytes);
 
+                        // Thread safety append data to queue and trigger wait function
+                        while (!Mtx.try_lock())
+                        Cv.notify_all();
+
+                        MessagesQueue.push(std::string(bytes));
+                        DataCounter.fetch_add(1);
+                        Mtx.unlock();
+
                         // EOF
                         if (readed == 0)
                         {
@@ -86,7 +100,6 @@ public:
                             return;
                         }
 
-                        MessagesQueue.push(std::string(bytes));
                         delete[] bytes;
                     }
                 }
@@ -135,18 +148,47 @@ public:
     std::string GetData()
     {
         std::string res = "";
+        Mtx.lock();
         if (!MessagesQueue.empty())
         {
             res = MessagesQueue.front();
             MessagesQueue.pop();
+            --DataCounter;
         }
+        Mtx.unlock();
+        return res;
+    }
+
+    std::string WaitData()
+    {
+        std::string res = "";
+        std::mutex cvMtx;
+        std::unique_lock <std::mutex> lk(cvMtx);
+
+StartWaiting:
+        Mtx.lock();
+
+        if (!MessagesQueue.empty())
+        {
+            res = MessagesQueue.front();
+            MessagesQueue.pop();
+            DataCounter.fetch_sub(1);
+            Mtx.unlock();
+        }
+        else
+        {
+            Cv.wait(lk);
+            Mtx.unlock();
+            goto StartWaiting;
+        }
+
         return res;
     }
 
     void StopProcess(std::string commandToSendToProcessToStop, bool isRequiredNewLineSymbol = true)
     {
         SendData(commandToSendToProcessToStop, isRequiredNewLineSymbol);
-        th.join();
+        Th.join();
 
         int a;
         waitpid(Pid, &a, 0);
@@ -154,9 +196,14 @@ public:
         close(PipeFromChild[0]);
     }
 
+    bool IsData()
+    {
+        return DataCounter.load() > 1; 
+    }
+
     ~Subprocess()
     {
-        if (th.joinable())
+        if (Th.joinable())
         {
             std::cerr << "Thread was not joined! Higly possible thar you dont stop process" << std::endl;
         }
