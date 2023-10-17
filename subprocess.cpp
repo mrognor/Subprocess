@@ -12,17 +12,19 @@ class Subprocess
 private:
     int PipeToChild[2];
     int PipeFromChild[2];
-    int n;
     pid_t Pid;
     std::queue<std::string> MessagesQueue;
     std::thread Th;
     std::atomic_uint64_t DataCounter;
     std::condition_variable Cv;
     std::mutex Mtx;
+    std::atomic_bool IsProcessEnded;
+
 public:
     void Launch(std::string programmName)
     {
         DataCounter.store(0);
+        IsProcessEnded.store(false);
 
         if (pipe(PipeToChild))
         {
@@ -78,19 +80,27 @@ public:
                         // Read data from pipe
                         int readed = read(PipeFromChild[0], bytes, nbytes);
 
-                        // Thread safety append data to queue and trigger wait function
-                        while (!Mtx.try_lock())
-                        Cv.notify_all();
-
-                        MessagesQueue.push(std::string(bytes));
-                        DataCounter.fetch_add(1);
-                        Mtx.unlock();
-
-                        // EOF
+                        // EOF and process finishing
                         if (readed == 0)
                         {
+                            // Thread safety append data to queue and trigger wait function
+                            while (!Mtx.try_lock())
+                                Cv.notify_all();
+                            IsProcessEnded.store(true);
+                            Mtx.unlock();
+
                             delete[] bytes;
                             break;
+                        }
+                        else
+                        {
+                            // Thread safety append data to queue and trigger wait function
+                            while (!Mtx.try_lock())
+                            Cv.notify_all();
+
+                            MessagesQueue.push(std::string(bytes));
+                            DataCounter.fetch_add(1);
+                            Mtx.unlock();
                         }
 
                         if (readed != nbytes)
@@ -139,10 +149,19 @@ public:
 
     void SendData(std::string data, bool isRequiredNewLineSymbol = true)
     {
+        Mtx.lock();
+        
+        if (IsProcessEnded.load())
+        {
+            Mtx.unlock();
+            return;
+        }
+
         if (isRequiredNewLineSymbol)
             data += '\n';
 
         write(PipeToChild[1], data.c_str(), data.length());
+        Mtx.unlock();
     }
 
     std::string GetData()
@@ -167,6 +186,12 @@ public:
 
 StartWaiting:
         Mtx.lock();
+
+        if (IsProcessEnded.load())
+        {
+            Mtx.unlock();
+            return "";
+        }
 
         if (!MessagesQueue.empty())
         {
@@ -201,6 +226,11 @@ StartWaiting:
         return DataCounter.load() > 1; 
     }
 
+    bool GetIsProcessEnded()
+    {
+        return IsProcessEnded.load();
+    }
+
     ~Subprocess()
     {
         if (Th.joinable())
@@ -226,13 +256,12 @@ int main()
         if (msg == "f")
         {
             s.StopProcess("quit");
+            s.WaitData();
             break;
         }
 
         s.SendData(msg);
-        sleep(1);
-
-        std::string res = s.GetData();
+        std::string res = s.WaitData();
 
         if (!res.empty())
             res.pop_back();
