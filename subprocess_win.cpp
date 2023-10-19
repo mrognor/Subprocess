@@ -243,7 +243,7 @@ public:
         return res;
     }
 
-    void StopProcess(std::string commandToSendToProcessToStop, bool isRequiredNewLineSymbol = true)
+    void StopProcess(std::string commandToSendToProcessToStop = "", bool isRequiredNewLineSymbol = true)
     {
         SendData(commandToSendToProcessToStop, isRequiredNewLineSymbol);
         Th.join();
