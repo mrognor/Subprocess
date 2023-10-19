@@ -71,14 +71,14 @@ public:
                     if(FD_ISSET(PipeFromChild[0], &requiredPipeEndsToPoll))
                     {
                         // Get available data  
-                        int nbytes;
-                        ioctl(PipeFromChild[0], FIONREAD, &nbytes);
+                        int availableBytes;
+                        ioctl(PipeFromChild[0], FIONREAD, &availableBytes);
 
                         // Allocate array
-                        char* bytes = new char [nbytes];
+                        char* bytes = new char [availableBytes];
 
                         // Read data from pipe
-                        int readed = read(PipeFromChild[0], bytes, nbytes);
+                        int readed = read(PipeFromChild[0], bytes, availableBytes);
 
                         // EOF and process finishing
                         if (readed == 0)
@@ -86,6 +86,7 @@ public:
                             // Thread safety append data to queue and trigger wait function
                             while (!Mtx.try_lock())
                                 Cv.notify_all();
+                            
                             IsProcessEnded.store(true);
                             Mtx.unlock();
 
@@ -94,20 +95,22 @@ public:
                         }
                         else
                         {
-                            // Thread safety append data to queue and trigger wait function
-                            while (!Mtx.try_lock())
-                            Cv.notify_all();
+                            if (readed != availableBytes)
+                            {
+                                std::cerr << "Failed to read data from pipe!" << std::endl;
+                                delete[] bytes;
+                                return;
+                            }
+                            else
+                            {
+                                // Thread safety append data to queue and trigger wait function
+                                while (!Mtx.try_lock())
+                                    Cv.notify_all();
 
-                            MessagesQueue.push(std::string(bytes));
-                            DataCounter.fetch_add(1);
-                            Mtx.unlock();
-                        }
-
-                        if (readed != nbytes)
-                        {
-                            std::cerr << "Failed to read data from pipe!" << std::endl;
-                            delete[] bytes;
-                            return;
+                                MessagesQueue.push(std::string(bytes, readed));
+                                DataCounter.fetch_add(1);
+                                Mtx.unlock();
+                            }
                         }
 
                         delete[] bytes;
@@ -164,7 +167,7 @@ public:
         Mtx.unlock();
     }
 
-    std::string GetData()
+    std::string GetData(bool isRemoveNewLineSymbols = true)
     {
         std::string res = "";
         Mtx.lock();
@@ -172,13 +175,21 @@ public:
         {
             res = MessagesQueue.front();
             MessagesQueue.pop();
-            --DataCounter;
+            DataCounter.fetch_sub(1);
         }
         Mtx.unlock();
+
+        if (isRemoveNewLineSymbols)
+        {
+            // Remove LF from res
+            if(!res.empty())
+                res.pop_back();
+        }
+
         return res;
     }
 
-    std::string WaitData()
+    std::string WaitData(bool isRemoveNewLineSymbols = true)
     {
         std::string res = "";
         std::mutex cvMtx;
@@ -205,6 +216,13 @@ StartWaiting:
             Cv.wait(lk);
             Mtx.unlock();
             goto StartWaiting;
+        }
+
+        if (isRemoveNewLineSymbols)
+        {
+            // Remove LF from res
+            if(!res.empty())
+                res.pop_back();
         }
 
         return res;
@@ -243,29 +261,30 @@ StartWaiting:
 // g++ subprocess.cpp -lpthread
 int main()
 {
-    // Что будет если процесс закончиться, а я попрбую записать данные туда. 
     Subprocess s;
-    
-    s.Launch("bc");
+
+    s.Launch("./test.out");
 
     std::string msg;
-    while (true)
+    std::string res;
+
+    for (int i = 0; i < 20; ++i)
     {
-        getline(std::cin, msg);
-        
-        if (msg == "f")
+        if (s.GetIsProcessEnded())
         {
-            s.StopProcess("quit");
-            s.WaitData();
+            std::cout << "Process ended before getting password!" << std::endl;
             break;
         }
 
-        s.SendData(msg);
-        std::string res = s.WaitData();
-
-        if (!res.empty())
-            res.pop_back();
-
-        std::cout << res << std::endl;
+        s.SendData(std::to_string(i));
+        res = s.WaitData();
+        
+        if (res == "yes")
+        {
+            std::cout << i << std::endl;
+            break;
+        }
     }
+
+    s.StopProcess("f");
 }
