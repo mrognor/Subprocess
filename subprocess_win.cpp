@@ -243,6 +243,53 @@ public:
         return res;
     }
 
+    template <class T = std::chrono::milliseconds>
+    std::string WaitDataFor(uint64_t timeToWait, bool isRemoveNewLineSymbols = true)
+    {
+        std::string res = "";
+        std::mutex cvMtx;
+        std::unique_lock <std::mutex> lk(cvMtx);
+
+StartWaiting:
+        Mtx.lock();
+
+        if (IsProcessEnded.load())
+        {
+            Mtx.unlock();
+            return "";
+        }
+
+        if (!MessagesQueue.empty())
+        {
+            res = MessagesQueue.front();
+            MessagesQueue.pop();
+            DataCounter.fetch_sub(1);
+            Mtx.unlock();
+        }
+        else
+        {
+            std::cv_status res = Cv.wait_for(lk, T(timeToWait));
+            Mtx.unlock();
+
+            if (res == std::cv_status::timeout)
+                return "";
+
+            goto StartWaiting;
+        }
+
+        if (isRemoveNewLineSymbols)
+        {
+            // Remove CR LF from res
+            if(!res.empty())
+                res.pop_back();
+            
+            if(!res.empty())
+                res.pop_back();
+        }
+
+        return res;
+    }
+
     void StopProcess(std::string commandToSendToProcessToStop = "", bool isRequiredNewLineSymbol = true)
     {
         SendData(commandToSendToProcessToStop, isRequiredNewLineSymbol);

@@ -125,17 +125,19 @@ public:
         {
             close(STDOUT_FILENO);
             close(STDIN_FILENO);
+            close(STDERR_FILENO);
 
             close(PipeToChild[1]);
             close(PipeFromChild[0]);
 
             dup2(PipeToChild[0], STDIN_FILENO);
             dup2(PipeFromChild[1], STDOUT_FILENO);
+            dup2(PipeFromChild[1], STDERR_FILENO);
 
             close(PipeToChild[0]);
             close(PipeFromChild[1]);
 
-            std::string command = programmName + " 2>&1";
+            std::string command = programmName;
             
             system(command.c_str());
 
@@ -215,6 +217,50 @@ StartWaiting:
         {
             Cv.wait(lk);
             Mtx.unlock();
+            goto StartWaiting;
+        }
+
+        if (isRemoveNewLineSymbols)
+        {
+            // Remove LF from res
+            if(!res.empty())
+                res.pop_back();
+        }
+
+        return res;
+    }
+
+    template <class T = std::chrono::milliseconds>
+    std::string WaitDataFor(uint64_t timeToWait, bool isRemoveNewLineSymbols = true)
+    {
+        std::string res = "";
+        std::mutex cvMtx;
+        std::unique_lock <std::mutex> lk(cvMtx);
+
+StartWaiting:
+        Mtx.lock();
+
+        if (IsProcessEnded.load())
+        {
+            Mtx.unlock();
+            return "";
+        }
+
+        if (!MessagesQueue.empty())
+        {
+            res = MessagesQueue.front();
+            MessagesQueue.pop();
+            DataCounter.fetch_sub(1);
+            Mtx.unlock();
+        }
+        else
+        {
+            std::cv_status res = Cv.wait_for(lk, T(timeToWait));
+            Mtx.unlock();
+
+            if (res == std::cv_status::timeout)
+                return "";
+
             goto StartWaiting;
         }
 
