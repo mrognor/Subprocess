@@ -200,7 +200,7 @@ public:
 StartWaiting:
         Mtx.lock();
 
-        if (IsProcessEnded.load())
+        if (IsProcessEnded.load() && MessagesQueue.empty())
         {
             Mtx.unlock();
             return "";
@@ -240,7 +240,7 @@ StartWaiting:
 StartWaiting:
         Mtx.lock();
 
-        if (IsProcessEnded.load())
+        if (IsProcessEnded.load() && MessagesQueue.empty())
         {
             Mtx.unlock();
             return "";
