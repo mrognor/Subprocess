@@ -299,7 +299,7 @@ StartWaiting:
     {
         if (Th.joinable())
         {
-            std::cerr << "Thread was not joined! Higly possible thar you dont stop process" << std::endl;
+            std::cerr << "Thread was not joined! Higly possible that you dont stop process" << std::endl;
         }
     }
 };
